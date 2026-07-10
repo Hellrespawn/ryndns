@@ -33,6 +33,7 @@ impl ApplicationConfig {
 #[derive(Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct ProviderConfig {
     token: String,
+    #[serde(default)]
     zones: Vec<ZoneConfig>,
 }
 
