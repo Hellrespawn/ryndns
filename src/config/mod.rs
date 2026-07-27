@@ -8,17 +8,11 @@ pub use fs::ApplicationConfigLoader;
 
 #[derive(Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct ApplicationConfig {
-    public_ip_url: String,
     cloudflare: Option<ProviderConfig>,
     bunny: Option<ProviderConfig>,
 }
 
 impl ApplicationConfig {
-    #[must_use]
-    pub fn public_ip_url(&self) -> &str {
-        &self.public_ip_url
-    }
-
     #[must_use]
     pub fn cloudflare(&self) -> Option<&ProviderConfig> {
         self.cloudflare.as_ref()
@@ -117,7 +111,6 @@ mod test {
 
     fn get_expected_config() -> ApplicationConfig {
         ApplicationConfig {
-            public_ip_url: "https://example.ip".to_owned(),
             cloudflare: Some(ProviderConfig {
                 token: "cf_token".to_owned(),
                 zones: vec![ZoneConfig {
