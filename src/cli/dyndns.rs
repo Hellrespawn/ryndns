@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 use camino::Utf8PathBuf;
 use clap::Parser;
@@ -8,12 +8,12 @@ use color_eyre::eyre::eyre;
 use tracing::{debug, info, trace};
 
 use crate::config::{ApplicationConfigLoader, ProviderConfig, ZoneConfig};
-use crate::get_public_ip_address;
-use crate::ip_cache::{IpCacheReader, IpCacheResult, IpCacheWriter};
+use crate::ip_cache::{IpCacheReader, IpCacheWriter};
 use crate::provider::bunny::BunnyProvider;
 use crate::provider::cloudflare::CloudflareProvider;
-use crate::provider::{DnsProvider, Zone};
-use crate::state::{ApplicationState, ApplicationStateBuilder};
+use crate::provider::{DnsProvider, DnsRecordType, Zone};
+use crate::state::{ApplicationState, ApplicationStateBuilder, PublicIps};
+use crate::{IPV4_URLS, IPV6_URLS, detect_ip};
 
 #[allow(clippy::doc_markdown)]
 #[derive(Debug, Parser)]
@@ -28,10 +28,13 @@ struct Args {
     /// configuration file, with a .cache extension.
     ip_cache: Option<Utf8PathBuf>,
 
-    /// The desired IP address. Defaults to the IP address determined via the
-    /// `public_ip_url` in the configuration.
-    #[arg(short, long)]
-    ip_address: Option<Ipv4Addr>,
+    /// The desired IPv4 address. Overrides automatic detection.
+    #[arg(long)]
+    ipv4_address: Option<IpAddr>,
+
+    /// The desired IPv6 address. Overrides automatic detection.
+    #[arg(long)]
+    ipv6_address: Option<IpAddr>,
 
     /// Shows what would happen, but doesn't change any settings.
     #[arg(short, long)]
@@ -70,17 +73,35 @@ pub async fn main() -> Result<()> {
     let ip_cache = IpCacheReader::load(&ip_cache_path)?;
     debug!("IP cache:\n{:#?}", ip_cache);
 
-    let public_ip_address = if let Some(ip) = args.ip_address {
-        ip
+    let ipv4 = if let Some(ip) = args.ipv4_address {
+        Some(ip)
     } else {
-        get_public_ip_address(config.public_ip_url()).await?
+        detect_ip(IPV4_URLS).await.ok()
+    };
+
+    let ipv6 = if let Some(ip) = args.ipv6_address {
+        Some(ip)
+    } else {
+        detect_ip(IPV6_URLS).await.ok()
+    };
+
+    let public_ips = match (ipv4, ipv6) {
+        (Some(v4), Some(v6)) => PublicIps::Both { ipv4: v4, ipv6: v6 },
+        (Some(v4), None) => PublicIps::V4(v4),
+        (None, Some(v6)) => PublicIps::V6(v6),
+        (None, None) => {
+            return Err(eyre!(
+                "Failed to detect both IPv4 and IPv6. \
+                 No address available to update records."
+            ));
+        },
     };
 
     let mut state = ApplicationStateBuilder::default()
         .config_path(config_path)
         .ip_cache(ip_cache)
         .ip_cache_path(ip_cache_path)
-        .public_ip_address(public_ip_address)
+        .public_ips(public_ips.clone())
         .preview(args.preview)
         .force(args.force)
         .build()?;
@@ -144,28 +165,17 @@ async fn handle_zone<P: DnsProvider>(
 
     info!("Handling zone '{}'", zone.name);
 
-    let public_ip_address = state.public_ip_address;
-    let result = state.ip_cache.handle_ip(&zone.id, public_ip_address);
+    let public_ips = &state.public_ips;
 
-    match result {
-        IpCacheResult::Unchanged => {
-            if state.force {
-                info!(
-                    "IP address unchanged: '{public_ip_address}', forcing update"
-                );
-            } else {
-                info!("IP address unchanged: '{public_ip_address}'");
-                return Ok(());
-            }
-        },
-        IpCacheResult::New => {
-            info!("IP address on first run: '{public_ip_address}'");
-        },
-        IpCacheResult::Changed { previous_ip_address } => {
-            info!(
-                "IP address updated: '{previous_ip_address}' => '{public_ip_address}'"
-            );
-        },
+    if !state.force && !state.ip_cache.has_changed(&zone.id, public_ips) {
+        info!("IP address unchanged: '{public_ips}'");
+        return Ok(());
+    }
+
+    if state.force {
+        info!("IP address: '{public_ips}', forcing update");
+    } else {
+        info!("IP address updated: '{public_ips}'");
     }
 
     let records = provider.list_records(zone).await?;
@@ -176,20 +186,51 @@ async fn handle_zone<P: DnsProvider>(
         .filter(|r| zone_config.is_record_selected(&r.name, r.record_type))
         .collect();
 
+    for record in &records_to_update {
+        if public_ips.get_for(record.record_type).is_none() {
+            let family = match record.record_type {
+                DnsRecordType::A => "IPv4",
+                DnsRecordType::AAAA => "IPv6",
+                other => {
+                    return Err(eyre!(
+                        "Record type '{other}' is not supported for IP updates"
+                    ));
+                },
+            };
+            return Err(eyre!(
+                "Config targets {} record '{}' on zone '{}', \
+                 but no {family} address was detected. \
+                 Use --ipv{}-address to provide one or ensure {family} connectivity.",
+                record.record_type,
+                record.name,
+                zone.name,
+                if matches!(record.record_type, DnsRecordType::A) { "4" } else { "6" },
+            ));
+        }
+    }
+
     debug!("Updating {} records:", records_to_update.len());
     for record in &records_to_update {
         debug!("{:>4}: {}", record.record_type, record.name);
     }
 
     for record in records_to_update {
+        let ip = public_ips
+            .get_for(record.record_type)
+            .expect("validated above");
+
         if state.preview {
-            info!("Would update {}.", record.name);
+            info!("Would update {} to {ip}.", record.name);
         } else {
-            info!("Updating {}...", record.name);
+            info!("Updating {} to {ip}...", record.name);
             provider
-                .update_record(zone, record, &public_ip_address.to_string())
+                .update_record(zone, record, &ip.to_string())
                 .await?;
         }
+    }
+
+    if !state.preview {
+        state.ip_cache.set(&zone.id, public_ips.clone());
     }
 
     Ok(())
