@@ -14,7 +14,7 @@ pub mod ip_cache;
 pub mod provider;
 pub mod state;
 
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 use std::str::FromStr;
 
 use color_eyre::Result;
@@ -28,6 +28,19 @@ pub const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const CRATE_NAME: &str = env!("CARGO_CRATE_NAME");
 
 const LOG_KEY: &str = "CFDD_LOG";
+
+/// IPv4 detection URLs, tried in order until one succeeds.
+pub const IPV4_URLS: &[&str] = &[
+    "https://api.ipify.org",
+    "https://ifconfig.me/ip",
+    "https://icanhazip.com",
+];
+
+/// IPv6 detection URLs, tried in order until one succeeds.
+pub const IPV6_URLS: &[&str] = &[
+    "https://api6.ipify.org",
+    "https://ifconfig.co/ip",
+];
 
 /// Install `color_eyre` and enable tracing. Defaults to `Level::INFO`.
 pub fn init() -> color_eyre::Result<()> {
@@ -69,6 +82,21 @@ pub fn init() -> color_eyre::Result<()> {
     Ok(())
 }
 
-pub async fn get_public_ip_address(url: &str) -> Result<Ipv4Addr> {
+pub async fn get_public_ip_address(url: &str) -> Result<IpAddr> {
     Ok(reqwest::get(url).await?.text().await?.parse()?)
+}
+
+/// Try each URL in the list until one returns a valid IP address.
+pub async fn detect_ip(urls: &[&str]) -> Result<IpAddr> {
+    for url in urls {
+        match get_public_ip_address(url).await {
+            Ok(ip) => return Ok(ip),
+            Err(e) => {
+                tracing::warn!("Failed to detect IP from {url}: {e}");
+            },
+        }
+    }
+    Err(color_eyre::eyre::eyre!(
+        "Failed to detect IP from all URLs"
+    ))
 }
