@@ -33,8 +33,7 @@ impl PublicIps {
 impl fmt::Display for PublicIps {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PublicIps::V4(ip) => write!(f, "{ip}"),
-            PublicIps::V6(ip) => write!(f, "{ip}"),
+            PublicIps::V4(ip) | PublicIps::V6(ip) => write!(f, "{ip}"),
             PublicIps::Both { ipv4, ipv6 } => write!(f, "{ipv4} / {ipv6}"),
         }
     }

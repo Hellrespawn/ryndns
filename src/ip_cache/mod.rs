@@ -1,7 +1,5 @@
 mod fs;
 
-use std::net::IpAddr;
-
 pub use fs::{IpCacheReader, IpCacheWriter};
 use indexmap::IndexMap;
 
@@ -48,6 +46,7 @@ impl<'a> IntoIterator for &'a IpCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
     use std::str::FromStr;
 
     fn v4(s: &str) -> PublicIps {
