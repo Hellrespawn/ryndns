@@ -1,33 +1,40 @@
-use camino::Utf8PathBuf;
 use clap::Parser;
 use color_eyre::Result;
 
-use crate::config::ApplicationConfigLoader;
-use crate::get_public_ip_address;
+use crate::detect_ip;
+use crate::{IPV4_URLS, IPV6_URLS};
 
-#[derive(Parser)]
-/// Show the current public IP address.
-struct Args {
-    /// Configuration file location. Defaults to
-    /// ~/.config/ryndns/ryndns.toml or /etc/ryndns/ryndns.toml when running as root.
-    config: Option<Utf8PathBuf>,
-}
+#[derive(Debug, Parser)]
+/// Show the current public IP addresses (IPv4 and IPv6).
+struct Args;
 
 pub async fn main() -> Result<()> {
     crate::init()?;
 
-    let args = Args::parse();
+    let _args = Args::parse();
 
-    let config_path =
-        args.config.unwrap_or(ApplicationConfigLoader::default_config_file()?);
+    let ipv4 = detect_ip(IPV4_URLS).await;
+    let ipv6 = detect_ip(IPV6_URLS).await;
 
-    let config = ApplicationConfigLoader::load_config_from(&config_path)?;
-
-    let ip_url = config.public_ip_url();
-
-    let public_ip = get_public_ip_address(ip_url).await?;
-
-    println!("Your public IP address is {public_ip}");
+    match (&ipv4, &ipv6) {
+        (Ok(v4), Ok(v6)) => {
+            println!("IPv4: {v4}");
+            println!("IPv6: {v6}");
+        },
+        (Ok(v4), Err(_)) => {
+            println!("IPv4: {v4}");
+            println!("IPv6: <not detected>");
+        },
+        (Err(_), Ok(v6)) => {
+            println!("IPv4: <not detected>");
+            println!("IPv6: {v6}");
+        },
+        (Err(_), Err(_)) => {
+            color_eyre::eyre::bail!(
+                "Failed to detect both IPv4 and IPv6 addresses"
+            );
+        },
+    }
 
     Ok(())
 }
